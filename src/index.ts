@@ -1,6 +1,7 @@
 const MAGIC = "OPKT";
-const VERSION = 1;
-const HEADER_SIZE = 28;
+const VERSION = 2;
+const HEADER_SIZE = 36;
+const V1_HEADER_SIZE = 28;
 const RATE = 48000;
 
 const FETCH_AHEAD = 1;
@@ -32,6 +33,17 @@ interface Header {
 	loopStart: number;
 	loopEnd: number;
 	packetSamples: number;
+	edgeFrames: number;
+	edgeEnd: Int16Array;
+	edgeStart: Int16Array;
+	regions: Region[];
+	dataOffset: number;
+}
+
+interface Region {
+	name: string;
+	start: number;
+	end: number;
 }
 
 interface Segment {
@@ -45,7 +57,8 @@ interface Segment {
 
 class OpkError extends Error {}
 
-function parseHeader(view: DataView): Header {
+function parseHeader(view: DataView): Header | null {
+	if (view.byteLength < 5) return null;
 	const magic = String.fromCharCode(
 		view.getUint8(0),
 		view.getUint8(1),
@@ -54,8 +67,12 @@ function parseHeader(view: DataView): Header {
 	);
 	if (magic !== MAGIC) throw new OpkError("not an opk file");
 	const version = view.getUint8(4);
-	if (version !== VERSION)
+	if (version !== 1 && version !== VERSION)
 		throw new OpkError(`unsupported opk version ${version}`);
+	const v1 = version === 1;
+	if (view.byteLength < (v1 ? V1_HEADER_SIZE : HEADER_SIZE)) return null;
+	const dataOffset = v1 ? V1_HEADER_SIZE : view.getUint32(32, true);
+	if (view.byteLength < dataOffset) return null;
 
 	const h: Header = {
 		channels: view.getUint8(5),
@@ -65,14 +82,82 @@ function parseHeader(view: DataView): Header {
 		loopStart: view.getUint32(16, true),
 		loopEnd: view.getUint32(20, true),
 		packetSamples: view.getUint16(24, true),
+		edgeFrames: v1 ? 0 : view.getUint16(26, true),
+		edgeEnd: new Int16Array(0),
+		edgeStart: new Int16Array(0),
+		regions: [],
+		dataOffset,
 	};
 	if (h.channels < 1 || h.channels > 2)
 		throw new OpkError(`unsupported channel count ${h.channels}`);
 	if (!h.packetSamples || !h.packetCount)
 		throw new OpkError("opk has no packets");
+
+	if (!h.loopEnd) h.loopEnd = h.totalSamples;
 	if (!(h.loopStart < h.loopEnd && h.loopEnd <= h.totalSamples))
 		throw new OpkError(`bad loop ${h.loopStart}..${h.loopEnd}`);
+	if (h.edgeFrames * 2 > h.loopEnd - h.loopStart)
+		throw new OpkError(`${h.edgeFrames} edge frames don't fit the loop`);
+
+	let pos = v1 ? V1_HEADER_SIZE : HEADER_SIZE;
+	const edge = (): Int16Array => {
+		const out = new Int16Array(h.edgeFrames * h.channels);
+		for (let i = 0; i < out.length; i++, pos += 2)
+			out[i] = view.getInt16(pos, true);
+		return out;
+	};
+	h.edgeEnd = edge();
+	h.edgeStart = edge();
+
+	const regionCount = v1 ? 0 : view.getUint32(28, true);
+	const names = new TextDecoder();
+	let start = 0;
+	for (let i = 0; i < regionCount; i++) {
+		if (pos + 6 > dataOffset) throw new OpkError("bad region table");
+		const length = view.getUint32(pos, true);
+		const nameLength = view.getUint16(pos + 4, true);
+		pos += 6;
+		if (pos + nameLength > dataOffset)
+			throw new OpkError("bad region table");
+		const name = names.decode(
+			new Uint8Array(view.buffer, view.byteOffset + pos, nameLength),
+		);
+		pos += nameLength;
+		h.regions.push({ name, start, end: start + length });
+		start += length;
+	}
+	if (start > h.totalSamples || pos > dataOffset)
+		throw new OpkError("bad region table");
 	return h;
+}
+
+function blendEdges(
+	h: Header,
+	planes: Float32Array[],
+	offset: number,
+	pos: number,
+	count: number,
+): void {
+	const n = h.edgeFrames;
+	const blend = (
+		sample: number,
+		edge: Int16Array,
+		frame: number,
+		w: number,
+	) => {
+		const i = sample - pos;
+		if (i < 0 || i >= count) return;
+		for (let c = 0; c < h.channels; c++) {
+			const plane = planes[c];
+			const lossless = edge[frame * h.channels + c] / 32768;
+			plane[offset + i] += (lossless - plane[offset + i]) * w;
+		}
+	};
+	for (let k = 0; k < n; k++) {
+		const w = 1 - k / n;
+		blend(h.loopStart + k, h.edgeStart, k, w);
+		blend(h.loopEnd - 1 - k, h.edgeEnd, n - 1 - k, w);
+	}
 }
 
 function opusHead(channels: number): Uint8Array<ArrayBuffer> {
@@ -374,6 +459,7 @@ export class OPKPlayer {
 					},
 				);
 			}
+			blendEdges(h, this.block, this.blockFrames, first + from, n);
 			this.blockFrames += n;
 			from += n;
 			if (this.blockFrames === BLOCK_FRAMES) this.flushBlock();
@@ -471,7 +557,7 @@ export class OPKPlayer {
 				? Math.max(
 						MIN_FETCH_BYTES,
 						Math.ceil(
-							((this.received - HEADER_SIZE) /
+							((this.received - this.header!.dataOffset) /
 								this.packets.length) *
 								((FETCH_CHUNK * RATE) /
 									this.header!.packetSamples),
@@ -556,17 +642,17 @@ export class OPKPlayer {
 		let pos = 0;
 
 		if (!this.header) {
-			if (buf.length < HEADER_SIZE) {
+			const h = parseHeader(view);
+			if (!h) {
 				this.leftover = buf;
 				return;
 			}
-			const h = parseHeader(view);
 			this.header = h;
 			this.block = Array.from(
 				{ length: h.channels },
 				() => new Float32Array(BLOCK_FRAMES),
 			);
-			pos = HEADER_SIZE;
+			pos = h.dataOffset;
 		}
 
 		const count = this.header.packetCount;
@@ -590,6 +676,7 @@ export class OPKSampleRegionPlayer {
 	private readonly ctx: AudioContext;
 	private readonly gain: GainNode;
 	private buffer: AudioBuffer | null = null;
+	private regions = new Map<string, Region>();
 	private destroyed = false;
 
 	constructor(uri: string, options: OpusPackSamplesOptions = {}) {
@@ -620,6 +707,14 @@ export class OPKSampleRegionPlayer {
 		);
 	}
 
+	playNamed(name: string): void {
+		if (!this.buffer || this.destroyed) return;
+
+		const region = this.regions.get(name);
+		if (!region) throw new OpkError(`no region named ${name}`);
+		this.play(region.start, region.end);
+	}
+
 	setVolume(volume: number): void {
 		if (this.destroyed) return;
 
@@ -648,6 +743,7 @@ export class OPKSampleRegionPlayer {
 		const data = new Uint8Array(await res.arrayBuffer());
 		const view = new DataView(data.buffer);
 		const h = parseHeader(view);
+		if (!h) throw new OpkError(`${uri} is truncated`);
 
 		const planes = Array.from(
 			{ length: h.channels },
@@ -678,7 +774,7 @@ export class OPKSampleRegionPlayer {
 			description: opusHead(h.channels),
 		});
 
-		let pos = HEADER_SIZE;
+		let pos = h.dataOffset;
 		for (let i = 0; i < h.packetCount; i++) {
 			if (pos + 2 > data.length)
 				throw new OpkError(`${uri} is truncated`);
@@ -701,8 +797,10 @@ export class OPKSampleRegionPlayer {
 		if (failed) throw failed;
 		if (this.destroyed) return;
 
+		blendEdges(h, planes, 0, 0, h.totalSamples);
 		const buffer = this.ctx.createBuffer(h.channels, h.totalSamples, RATE);
 		planes.forEach((plane, c) => buffer.copyToChannel(plane, c));
+		this.regions = new Map(h.regions.map((r) => [r.name, r]));
 		this.buffer = buffer;
 	}
 }
