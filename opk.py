@@ -154,6 +154,9 @@ def resolve_loop(args, wave, total):
             start = wave.loop[0]
         if end is None:
             end = wave.loop[1]
+            # some tools write the smpl end as exclusive, which lands one past the last frame
+            if end == wave.frames + 1:
+                end = wave.frames
         source = source + " + smpl chunk" if source else "smpl chunk"
     if start is None and end is None:
         return 0, 0, "default (no loop points)"
