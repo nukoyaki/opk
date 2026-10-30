@@ -2,6 +2,7 @@
 
 import argparse
 import array
+import functools
 import struct
 import subprocess
 import sys
@@ -105,6 +106,12 @@ def ffmpeg(args, stdin=None):
     return r.stdout
 
 
+@functools.cache
+def resampler():
+    conf = subprocess.run(["ffmpeg", "-hide_banner", "-buildconf"], capture_output=True).stdout
+    return ["-af", "aresample=resampler=soxr:precision=28"] if b"enable-libsoxr" in conf else []
+
+
 def load(path):
     """Return (wave, f32le pcm at 48 kHz) for any input file."""
     data = path.read_bytes()
@@ -113,13 +120,13 @@ def load(path):
         if wave.fmt == "f32le" and wave.rate == RATE:
             return wave, bytes(wave.data)
         pcm = ffmpeg(["-f", wave.fmt, "-ar", str(wave.rate), "-ac", str(wave.channels),
-                      "-i", "-", "-f", "f32le", "-ar", str(RATE), "-"], wave.data)
+                      "-i", "-", *resampler(), "-f", "f32le", "-ar", str(RATE), "-"], wave.data)
     else:
         wave = parse_wav(ffmpeg(["-i", str(path), "-vn", "-c:a", "pcm_f32le", "-f", "wav", "-"]),
                          path.name)
         wave.loop = None
         pcm = ffmpeg(["-f", "f32le", "-ar", str(wave.rate), "-ac", str(wave.channels),
-                      "-i", "-", "-f", "f32le", "-ar", str(RATE), "-"], wave.data) \
+                      "-i", "-", *resampler(), "-f", "f32le", "-ar", str(RATE), "-"], wave.data) \
             if wave.rate != RATE else bytes(wave.data)
     if wave.channels > 2:
         raise PackError(f"{path.name} has {wave.channels} channels, only mono and stereo are supported")
@@ -203,11 +210,12 @@ def packet_samples(pkt):
     return frame * frames
 
 
-def encode(pcm, channels, bitrate):
+def encode(pcm, channels, bitrate, application):
     """Encode f32le 48 kHz pcm, returning (pre_skip, packets, packet_samples, total)."""
     packets = list(ogg_packets(ffmpeg(
         ["-f", "f32le", "-ar", str(RATE), "-ac", str(channels), "-i", "-",
-         "-c:a", "libopus", "-b:a", bitrate, "-f", "ogg", "-"], pcm)))
+         "-c:a", "libopus", "-b:a", bitrate, "-vbr", "on", "-compression_level", "10",
+         "-application", application, "-frame_duration", "20", "-f", "ogg", "-"], pcm)))
 
     head = packets[0][0]
     if not head.startswith(b"OpusHead") or head[9] != channels:
@@ -289,14 +297,17 @@ def main():
     ap.add_argument("output")
     ap.add_argument("--loop-start", type=int, help="loop start in source samples (default: smpl chunk, else 0)")
     ap.add_argument("--loop-end", type=int, help="loop end in source samples, exclusive (default: smpl chunk, else 0)")
-    ap.add_argument("--bitrate", default="128k", help="libopus bitrate (default: 128k)")
+    ap.add_argument("--bitrate", default="128k", help="libopus VBR target bitrate (default: 128k)")
+    ap.add_argument("--application", default="audio", choices=["audio", "voip", "lowdelay"],
+                    help="libopus application: audio for music and effects, voip for speech, "
+                         "lowdelay for CELT only (default: audio)")
     args = ap.parse_args()
 
     src = Path(args.input)
     try:
         pack = pack_folder if src.is_dir() else pack_file
         pcm, channels, loop_start, loop_end, edge, regions, extra, info = pack(args, src)
-        pre_skip, audio, per_packet, total = encode(pcm, channels, args.bitrate)
+        pre_skip, audio, per_packet, total = encode(pcm, channels, args.bitrate, args.application)
     except (PackError, OSError) as e:
         sys.exit(f"error: {e}")
 
@@ -321,6 +332,8 @@ def main():
     print(f"wrote {args.output}: {len(out):,} bytes - verified")
     print(f"  {channels} ch, {len(audio):,} packets x {per_packet} samples, pre-skip {pre_skip}")
     print(f"  length    {total:,} samples ({total / RATE:.3f} s)")
+    print(f"  bitrate   {(len(out) - data_offset) * 8 * RATE / total / 1000:.1f} kbps actual, "
+          f"{args.bitrate} target ({args.application})")
     print("\n".join(info))
 
 
