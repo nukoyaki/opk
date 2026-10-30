@@ -18,15 +18,16 @@ import with
 import { OPKPlayer, OPKSampleRegionPlayer } from "opk";
 ```
 
-you should use OPKPlayer for streaming and if you're instead using the opk to store a table of sound effects you use OPKSampleRegionPlayer, however the header has no native support to store the sound regions so you must hardcode the regions in your uses of OPKSampleRegionPlayer, also OPKSampleRegionPlayer doesn't stream the regions when requested, it will load the entire audio instead<br/>
+you should use OPKPlayer for streaming and if you're instead using the opk to store a table of sound effects you use OPKSampleRegionPlayer<br/>
 
-for packing the opk use opus_pack.py:<br/>
+for packing the opk use opk.py:<br/>
 
 ```bash
-python3 opus_pack.py --loop-start start --lop-end end input.ogg output.opk
+# --loop-start and --loop-end can be omitted for waves that include the loop point
+python3 opk.py --loop-start start --loop-end end input.wav output.opk
 ```
 
-opus_pack.py assumes the input is already an ogg container with opus audio (use ffmpeg for that)<br/>
+opk.py calls into ffmpeg, but you should still only work with wavs if you intend to use loop points as opk.py can automatically uses the loop points from the smpl chunk<br/>
 the loop points are sample based rather then seconds, if you don't already have these values you can find them in <br/>audacity and set your selection like this,<br/>
 
 first make sure both of the counters are set to samples<br/>
