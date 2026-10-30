@@ -204,6 +204,7 @@ export class OPKPlayer {
 	private framesOut = 0;
 	private lastBuffer: AudioBuffer | null = null;
 	private readonly sources = new Set<AudioBufferSourceNode>();
+	private repeats: [start: number, end: number][] = [];
 	private finished = false;
 
 	constructor(uri: string, options: OpusPackPlayerOptions = {}) {
@@ -274,6 +275,15 @@ export class OPKPlayer {
 		);
 	}
 
+	get starved(): boolean {
+		if (this.state !== "playing") return false;
+
+		const now = this.ctx.currentTime - (this.ctx.outputLatency || 0);
+		this.repeats = this.repeats.filter(([, end]) => end > now);
+
+		return this.repeats.some(([start]) => now >= start);
+	}
+
 	destroy(): void {
 		if (this.state === "destroyed") return;
 
@@ -301,6 +311,7 @@ export class OPKPlayer {
 		}
 
 		this.sources.clear();
+		this.repeats = [];
 		this.blockFrames = 0;
 		this.base = -1;
 		this.framesOut = 0;
@@ -371,7 +382,7 @@ export class OPKPlayer {
 			} else if (this.ahead() < UNDERRUN) {
 				if (this.blockFrames) this.flushBlock();
 				while (this.lastBuffer && this.ahead() < UNDERRUN)
-					this.schedule(this.lastBuffer);
+					this.schedule(this.lastBuffer, true);
 			}
 		}
 	}
@@ -485,7 +496,7 @@ export class OPKPlayer {
 		this.schedule(buffer);
 	}
 
-	private schedule(buffer: AudioBuffer): void {
+	private schedule(buffer: AudioBuffer, repeat = false): void {
 		let when = this.base + this.framesOut / RATE;
 
 		if (this.base < 0 || when < this.ctx.currentTime + 0.01) {
@@ -508,6 +519,7 @@ export class OPKPlayer {
 		};
 		src.start(when);
 		this.sources.add(src);
+		if (repeat) this.repeats.push([when, when + buffer.duration]);
 	}
 
 	private fetchIfNeeded(): void {
