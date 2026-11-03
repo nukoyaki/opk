@@ -704,7 +704,7 @@ export class OPKSampleRegionPlayer {
 		this.ready.catch(options.onError ?? console.error);
 	}
 
-	play(start: number, end: number): void {
+	play(start: number, end: number, rate = 1): void {
 		const buffer = this.buffer;
 		if (!buffer || this.destroyed) return;
 
@@ -712,6 +712,7 @@ export class OPKSampleRegionPlayer {
 
 		const src = this.ctx.createBufferSource();
 		src.buffer = buffer;
+		src.playbackRate.value = rate;
 		src.connect(this.gain);
 		src.onended = () => src.disconnect();
 		src.start(
@@ -721,12 +722,12 @@ export class OPKSampleRegionPlayer {
 		);
 	}
 
-	playNamed(name: string): void {
+	playNamed(name: string, rate = 1): void {
 		if (!this.buffer || this.destroyed) return;
 
 		const region = this.regions.get(name);
 		if (!region) throw new OpkError(`no region named ${name}`);
-		this.play(region.start, region.end);
+		this.play(region.start, region.end, rate);
 	}
 
 	setVolume(volume: number): void {
