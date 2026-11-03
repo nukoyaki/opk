@@ -690,6 +690,7 @@ export class OPKSampleRegionPlayer {
 	private buffer: AudioBuffer | null = null;
 	private regions = new Map<string, Region>();
 	private destroyed = false;
+	readonly ready: Promise<void>;
 
 	constructor(uri: string, options: OpusPackSamplesOptions = {}) {
 		this.ctx = new AudioContext({
@@ -699,7 +700,8 @@ export class OPKSampleRegionPlayer {
 		this.gain = this.ctx.createGain();
 		this.gain.gain.value = options.volume ?? 1;
 		this.gain.connect(this.ctx.destination);
-		this.load(uri).catch(options.onError ?? console.error);
+		this.ready = this.load(uri);
+		this.ready.catch(options.onError ?? console.error);
 	}
 
 	play(start: number, end: number): void {
