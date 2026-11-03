@@ -704,30 +704,42 @@ export class OPKSampleRegionPlayer {
 		this.ready.catch(options.onError ?? console.error);
 	}
 
-	play(start: number, end: number, rate = 1): void {
+	play(start: number, end: number, volume = 1, rate = 1): () => void {
 		const buffer = this.buffer;
-		if (!buffer || this.destroyed) return;
+		if (!buffer || this.destroyed) return () => {};
 
 		this.ctx.resume().catch(() => {});
 
 		const src = this.ctx.createBufferSource();
 		src.buffer = buffer;
 		src.playbackRate.value = rate;
-		src.connect(this.gain);
-		src.onended = () => src.disconnect();
+		const gain = this.ctx.createGain();
+		gain.gain.value = Math.max(0, volume);
+		src.connect(gain).connect(this.gain);
+		src.onended = () => {
+			src.disconnect();
+			gain.disconnect();
+		};
 		src.start(
 			0,
 			start / RATE,
 			(Math.min(end, buffer.length) - start) / RATE,
 		);
+		let stopped = false;
+		src.addEventListener("ended", () => (stopped = true));
+		return () => {
+			if (stopped) return;
+			stopped = true;
+			src.stop();
+		};
 	}
 
-	playNamed(name: string, rate = 1): void {
-		if (!this.buffer || this.destroyed) return;
+	playNamed(name: string, volume = 1, rate = 1): () => void {
+		if (!this.buffer || this.destroyed) return () => {};
 
 		const region = this.regions.get(name);
 		if (!region) throw new OpkError(`no region named ${name}`);
-		this.play(region.start, region.end, rate);
+		return this.play(region.start, region.end, volume, rate);
 	}
 
 	setVolume(volume: number): void {
