@@ -1,8 +1,10 @@
 const MAGIC = "OPKT";
-const VERSION = 2;
+const VERSION = 3;
 const HEADER_SIZE = 36;
 const V1_HEADER_SIZE = 28;
 const RATE = 48000;
+const REGION_PAD = 16;
+const REGION_TAIL = 8;
 
 const FETCH_AHEAD = 1;
 const FETCH_CHUNK = 2;
@@ -67,7 +69,7 @@ function parseHeader(view: DataView): Header | null {
 	);
 	if (magic !== MAGIC) throw new OpkError("not an opk file");
 	const version = view.getUint8(4);
-	if (version !== 1 && version !== VERSION)
+	if (version < 1 || version > VERSION)
 		throw new OpkError(`unsupported opk version ${version}`);
 	const v1 = version === 1;
 	if (view.byteLength < (v1 ? V1_HEADER_SIZE : HEADER_SIZE)) return null;
@@ -110,6 +112,8 @@ function parseHeader(view: DataView): Header | null {
 	h.edgeStart = edge();
 
 	const regionCount = v1 ? 0 : view.getUint32(28, true);
+	const pad = version >= 3 ? REGION_PAD : 0;
+	const tail = version >= 3 ? REGION_TAIL : 0;
 	const names = new TextDecoder();
 	let start = 0;
 	for (let i = 0; i < regionCount; i++) {
@@ -123,8 +127,8 @@ function parseHeader(view: DataView): Header | null {
 			new Uint8Array(view.buffer, view.byteOffset + pos, nameLength),
 		);
 		pos += nameLength;
-		h.regions.push({ name, start, end: start + length });
-		start += length;
+		h.regions.push({ name, start, end: start + length + tail });
+		start += length + pad;
 	}
 	if (start > h.totalSamples || pos > dataOffset)
 		throw new OpkError("bad region table");

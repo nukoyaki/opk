@@ -9,9 +9,11 @@ import sys
 from pathlib import Path
 
 MAGIC = b"OPKT"
-VERSION = 2
+VERSION = 3
 RATE = 48000
 EDGE = 8
+REGION_PAD = 16
+REGION_TAIL = 8
 HEADER = struct.Struct("<4sBBHIIIIHHII")
 REGION = struct.Struct("<IH")
 
@@ -284,13 +286,16 @@ def pack_folder(args, folder):
         if len(raw) > 0xFFFF:
             raise PackError(f"region name {name[:32]}... is too long")
         parts.append(pcm)
+        parts.append(bytes(REGION_PAD * channels * 4))
         regions.append((name, frames))
         table += REGION.pack(frames, len(raw)) + raw
 
-    info, pos = [f"  {len(regions)} regions"], 0
+    info, pos = [f"  {len(regions)} regions, {REGION_PAD} frames of silence after each "
+                 f"({REGION_TAIL} played)"], 0
     for name, frames in regions:
-        info.append(f"    {name:<24} {pos:>10,} .. {pos + frames:>10,} ({frames / RATE:.3f} s)")
-        pos += frames
+        end = pos + frames + REGION_TAIL
+        info.append(f"    {name:<24} {pos:>10,} .. {end:>10,} ({(end - pos) / RATE:.3f} s)")
+        pos += frames + REGION_PAD
     return b"".join(parts), channels, 0, 0, 0, regions, table, info
 
 
