@@ -3,7 +3,7 @@ const VERSION = 3;
 const HEADER_SIZE = 36;
 const V1_HEADER_SIZE = 28;
 const RATE = 48000;
-const REGION_PAD = 16;
+const REGION_PAD = 960;
 const REGION_TAIL = 8;
 
 const FETCH_AHEAD = 1;
